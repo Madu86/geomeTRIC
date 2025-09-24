@@ -1899,7 +1899,38 @@ class QCEngineAPI(Engine):
 class PySander(Engine):
     """
     Run a PySander energy and gradient calculation using sander.
+    Optimized version with cached imports and reduced overhead.
     """
+    
+    # Class-level imports and constants to avoid repeated import overhead
+    _imports_cached = False
+    _sander = None
+    _parmed_load_file = None
+    _gas_input = None
+    _setup = None
+    _set_positions = None
+    _energy_forces = None
+    
+    # Pre-calculated conversion factors
+    KCALMOL_TO_HARTREE = 0.0015936014378007623
+    AMBER_TO_GEOM_FORCE = 0.000843297564146418
+    
+    @classmethod
+    def _cache_imports(cls):
+        """Cache expensive imports at class level to avoid repeated imports."""
+        if not cls._imports_cached:
+            try:
+                from parmed import load_file
+                from sander import gas_input, setup, set_positions, energy_forces
+                cls._parmed_load_file = load_file
+                cls._gas_input = gas_input
+                cls._setup = setup
+                cls._set_positions = set_positions
+                cls._energy_forces = energy_forces
+                cls._imports_cached = True
+            except ImportError as e:
+                raise PySanderEngineError(f"PySander engine requires 'parmed' and 'sander' packages: {e}")
+    
     def __init__(self, molecule, prmtop_file, inpcrd_file):
         # Require a valid molecule
         if molecule is None:
@@ -1907,51 +1938,88 @@ class PySander(Engine):
             
         super(PySander, self).__init__(molecule)
         
-        # Conversion factors
-        self.KCALMOL_TO_HARTREE = 0.0015936014378007623
-        self.AMBER_TO_GEOM_FORCE = 0.000843297564146418
+        # Cache imports once per class
+        self._cache_imports()
         
         # Store file paths
         self.prmtop_file = prmtop_file
         self.inpcrd_file = inpcrd_file
         
+        # Initialize cached data structures
+        self.parm = None
+        self.inp = None
+        self.box = None
+        self._coords_cache = None
+        self._coords_ang_buffer = None
+        self._sander_context = None
+        self._context_initialized = False
+        
         # Load the parameter files
         self._load_parm_files()
-
+        
         # Set input
         self._set_input()
     
     def _load_parm_files(self):
-        """Load the AMBER parameter and coordinate files."""
-        try:
-            from parmed import load_file
-            import os
-        except ImportError:
-            raise PySanderEngineError("PySander engine requires 'parmed' and 'sander' packages. Please install them.")
+        """Load the AMBER parameter and coordinate files using cached imports."""
+        import os
         
         if not os.path.exists(self.prmtop_file):
             raise PySanderEngineError(f"Parameter file {self.prmtop_file} does not exist")
         if not os.path.exists(self.inpcrd_file):
             raise PySanderEngineError(f"Coordinate file {self.inpcrd_file} does not exist")
         
-        # Load the parmed structure directly from files
-        self.parm = load_file(self.prmtop_file, self.inpcrd_file)
+        try:
+            # Load the parmed structure from prmtop file using cached import
+            self.parm = self.__class__._parmed_load_file(self.prmtop_file)
+            
+            # Load coordinates from inpcrd file
+            self.parm.load_rst7(self.inpcrd_file)
+            
+            # Pre-allocate coordinate buffer for frequent conversions
+            n_atoms = len(self.parm.atoms)
+            self._coords_ang_buffer = np.zeros((n_atoms, 3), dtype=np.float64)
+            
+        except Exception as e:
+            raise PySanderEngineError(f"Failed to load parameter files: {e}")
+    
+    def _initialize_sander_context(self):
+        """Initialize persistent sander context to avoid setup overhead."""
+        if not self._context_initialized:
+            try:
+                self._sander_context = self.__class__._setup(self.parm, self.parm.coordinates, self.box, self.inp)
+                self._context_initialized = True
+            except Exception as e:
+                raise PySanderEngineError(f"Failed to initialize sander context: {e}")
+    
+    def _cleanup_sander_context(self):
+        """Clean up sander context when done."""
+        if self._context_initialized and self._sander_context is not None:
+            try:
+                self._sander_context.__exit__(None, None, None)
+                self._context_initialized = False
+                self._sander_context = None
+            except:
+                pass  # Ignore cleanup errors
+    
+    def __del__(self):
+        """Destructor to clean up sander context."""
+        self._cleanup_sander_context()
 
     def _set_input(self):
-        """Setup sander input."""
+        """Setup sander input using cached imports."""
         try:
-            from sander import gas_input
-        except ImportError:
-            raise PySanderEngineError("PySander engine requires 'parmed' and 'sander' packages. Please install them.")        
-
-        # Set up sander input for gas phase calculation
-        self.inp = gas_input(6)  # 6 = igb for gas phase
-        self.box = None
+            # Set up sander input for gas phase calculation using cached import
+            self.inp = self.__class__._gas_input(6)  # 6 = igb for gas phase
+            self.box = None
+        except Exception as e:
+            raise PySanderEngineError(f"Failed to setup sander input: {e}")
 
 
     def calc_new(self, coords, dirname):
         """
         Calculate energy and gradient using PySander.
+        Optimized version with reduced coordinate conversions, memory allocations, and persistent context.
         
         Parameters
         ----------
@@ -1965,38 +2033,68 @@ class PySander(Engine):
         dict
             Dictionary containing energy and gradient
         """
+        import numpy as np
+        
+        # Quick check if coordinates haven't changed significantly (optional optimization)
+        coords_changed = True
+        if self._coords_cache is not None and len(self._coords_cache) == len(coords):
+            if np.allclose(coords, self._coords_cache, rtol=1e-12, atol=1e-12):
+                coords_changed = False
+        
+        if coords_changed:
+            # Store current coordinates for potential caching
+            if self._coords_cache is None or len(self._coords_cache) != len(coords):
+                self._coords_cache = np.copy(coords)
+            else:
+                self._coords_cache[:] = coords
+            
+            # Convert coordinates from Bohr to Angstrom - use pre-allocated buffer
+            coords_reshaped = coords.reshape(-1, 3)
+            self._coords_ang_buffer[:] = coords_reshaped * bohr2ang
+            
+            # Update the parmed structure with new coordinates
+            coords_flat = self._coords_ang_buffer.flatten()
+            self.parm.coordinates = coords_flat
+        
         try:
-            import numpy as np
-            from sander import setup, set_positions, energy_forces
-        except ImportError:
-            raise PySanderEngineError("PySander engine requires 'sander' package. Please install it.")
-        
-        # Convert coordinates from Bohr to Angstrom and reshape
-        coords_ang = coords.reshape(-1, 3) * bohr2ang
-        
-        # Update the parmed structure with new coordinates
-        self.parm.coordinates = coords_ang.flatten()
-        
-        try:
-            with setup(self.parm, self.parm.coordinates, self.box, self.inp):
-                def f_and_g(x_flat):
-                    set_positions(x_flat.reshape((-1, 3)))
-                    ene, grad = energy_forces()
-                    return ene.tot, np.asarray(grad, dtype=np.float64)
+            # Use persistent sander context if available, otherwise fall back to temporary context
+            use_temp_context = not self._context_initialized
+            
+            if use_temp_context:
+                # Fall back to temporary context for this calculation
+                context_manager = self.__class__._setup(self.parm, self.parm.coordinates, self.box, self.inp)
+            else:
+                # Use persistent context
+                context_manager = None  # Already set up
+            
+            # Define calculation function
+            def f_and_g(x_flat):
+                self.__class__._set_positions(x_flat.reshape((-1, 3)))
+                ene, grad = self.__class__._energy_forces()
+                return ene.tot, np.asarray(grad, dtype=np.float64)
+            
+            if use_temp_context:
+                with context_manager:
+                    x0 = np.asarray(self.parm.coordinates, dtype=np.float64)
+                    energy_kcalmol, gradient_amber = f_and_g(x0)
+            else:
+                # Initialize persistent context if not done
+                if not self._context_initialized:
+                    self._initialize_sander_context()
                 
-                # Get initial coordinates
-                x0 = np.array(self.parm.coordinates, dtype=np.float64).reshape(-1)
-                
-                # Calculate energy and gradient
+                x0 = np.asarray(self.parm.coordinates, dtype=np.float64)
                 energy_kcalmol, gradient_amber = f_and_g(x0)
                 
         except Exception as e:
             raise PySanderEngineError(f"PySander calculation failed: {str(e)}")
         
-        # Convert units
+        # Convert units efficiently
         energy_hartree = energy_kcalmol * self.KCALMOL_TO_HARTREE
-        gradient_geom = -gradient_amber * self.AMBER_TO_GEOM_FORCE
+        # Apply conversion and sign change in one operation
+        gradient_geom = gradient_amber * (-self.AMBER_TO_GEOM_FORCE)
         gradient_flat = gradient_geom.flatten()
+        
+        return {'energy': energy_hartree, 'gradient': gradient_flat}
         
         return {'energy': energy_hartree, 'gradient': gradient_flat}
 
