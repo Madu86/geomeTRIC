@@ -109,6 +109,9 @@ class QCEngineAPIEngineError(EngineError):
 class ConicalIntersectionEngineError(EngineError):
     pass
 
+class PySanderEngineError(EngineError):
+    pass
+
 class QCAIOptimizationError(EngineError):
     pass
 

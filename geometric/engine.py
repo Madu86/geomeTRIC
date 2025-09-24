@@ -46,7 +46,7 @@ import os
 from .molecule import Molecule, format_xyz_coord
 from .nifty import bak, au2ev, eqcgmx, fqcgmx, bohr2ang, logger, getWorkQueue, queue_up_src_dest, rootdir, copy_tree_over
 from .errors import EngineError, CheckCoordError, Psi4EngineError, QChemEngineError, TeraChemEngineError, \
-    ConicalIntersectionEngineError, OpenMMEngineError, GromacsEngineError, MolproEngineError, QCEngineAPIEngineError, GaussianEngineError, QUICKEngineError, CFOUREngineError
+    ConicalIntersectionEngineError, OpenMMEngineError, GromacsEngineError, MolproEngineError, QCEngineAPIEngineError, GaussianEngineError, QUICKEngineError, CFOUREngineError, PySanderEngineError
 from .xml_helper import read_coors_from_xml, write_coors_to_xml
 
 # Strings matching common DFT functionals
@@ -1896,6 +1896,100 @@ class QCEngineAPI(Engine):
     def detect_dft(self):
         return any([i.lower() in self.schema["model"]["method"].lower() for i in dft_strings])
 
+class PySander(Engine):
+    """
+    Run a PySander energy and gradient calculation using sander.
+    """
+    def __init__(self, molecule, prmtop_file, inpcrd_file):
+        # Require a valid molecule
+        if molecule is None:
+            raise PySanderEngineError("PySander engine requires a valid Molecule object")
+            
+        super(PySander, self).__init__(molecule)
+        
+        # Conversion factors
+        self.KCALMOL_TO_HARTREE = 0.0015936014378007623
+        self.AMBER_TO_GEOM_FORCE = 0.000843297564146418
+        
+        # Store file paths
+        self.prmtop_file = prmtop_file
+        self.inpcrd_file = inpcrd_file
+        
+        # Load the parameter files
+        self._load_parm_files()
+    
+    def _load_parm_files(self):
+        """Load the AMBER parameter and coordinate files."""
+        try:
+            from parmed import load_file
+            import sander
+            import os
+        except ImportError:
+            raise PySanderEngineError("PySander engine requires 'parmed' and 'sander' packages. Please install them.")
+        
+        if not os.path.exists(self.prmtop_file):
+            raise PySanderEngineError(f"Parameter file {self.prmtop_file} does not exist")
+        if not os.path.exists(self.inpcrd_file):
+            raise PySanderEngineError(f"Coordinate file {self.inpcrd_file} does not exist")
+        
+        # Load the parmed structure directly from files
+        self.parm = load_file(self.prmtop_file, self.inpcrd_file)
+        
+    def calc_new(self, coords, dirname):
+        """
+        Calculate energy and gradient using PySander.
+        
+        Parameters
+        ----------
+        coords : np.ndarray
+            1-dimensional array of atomic coordinates in Bohr
+        dirname : str
+            Directory for calculation (not used for PySander)
+            
+        Returns
+        -------
+        dict
+            Dictionary containing energy and gradient
+        """
+        try:
+            import numpy as np
+            import sander
+        except ImportError:
+            raise PySanderEngineError("PySander engine requires 'sander' package. Please install it.")
+        
+        # Convert coordinates from Bohr to Angstrom and reshape
+        coords_ang = coords.reshape(-1, 3) * bohr2ang
+        
+        # Update the parmed structure with new coordinates
+        self.parm.coordinates = coords_ang.flatten()
+        
+        # Set up sander input for gas phase calculation
+        inp = sander.gas_input(6)  # 6 = igb for gas phase
+        box = None
+        
+        try:
+            with sander.setup(self.parm, self.parm.coordinates, box, inp):
+                def f_and_g(x_flat):
+                    sander.set_positions(x_flat.reshape((-1, 3)))
+                    ene, grad = sander.energy_forces()
+                    return ene.tot, np.asarray(grad, dtype=np.float64)
+                
+                # Get initial coordinates
+                x0 = np.array(self.parm.coordinates, dtype=np.float64).reshape(-1)
+                
+                # Calculate energy and gradient
+                energy_kcalmol, gradient_amber = f_and_g(x0)
+                
+        except Exception as e:
+            raise PySanderEngineError(f"PySander calculation failed: {str(e)}")
+        
+        # Convert units
+        energy_hartree = energy_kcalmol * self.KCALMOL_TO_HARTREE
+        gradient_geom = -gradient_amber * self.AMBER_TO_GEOM_FORCE
+        gradient_flat = gradient_geom.flatten()
+        
+        return {'energy': energy_hartree, 'gradient': gradient_flat}
+
 class ConicalIntersection(Engine):
     """
     Compute conical intersection objective function with penalty constraint.
@@ -1984,3 +2078,4 @@ class ConicalIntersection(Engine):
                 return True
         else:
             return False
+

@@ -422,6 +422,8 @@ def parse_optimizer_args(*args):
         '--ase-kwargs',
         type=str,
         help='ASE calculator keyword args, as JSON dictionary, eg. {"param_filename":"path/to/file.xml"}')
+    grp_software.add_argument('--prmtop', type=str, help='AMBER topology file (.prmtop) for PySander engine.\n ')
+    grp_software.add_argument('--inpcrd', type=str, help='AMBER coordinate file (.inpcrd or .rst7) for PySander engine.\n ')
 
     grp_debug = parser.add_argument_group('debug', 'Relevant for development and debugging')
     grp_debug.add_argument('--displace', type=str2bool, help='Provide "yes" to write out displacements of the internal coordinates.\n ')

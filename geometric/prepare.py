@@ -44,7 +44,7 @@ import os
 from .ase_engine import EngineASE
 from .errors import EngineError, InputError
 from .internal import Distance, Angle, Dihedral, CartesianX, CartesianY, CartesianZ, TranslationX, TranslationY, TranslationZ, RotationA, RotationB, RotationC, CentroidDistance
-from .engine import set_tcenv, load_tcin, TeraChem, ConicalIntersection, Psi4, QChem, Gromacs, Molpro, OpenMM, QCEngineAPI, Gaussian, QUICK, CFOUR
+from .engine import set_tcenv, load_tcin, TeraChem, ConicalIntersection, Psi4, QChem, Gromacs, Molpro, OpenMM, QCEngineAPI, Gaussian, QUICK, CFOUR, PySander
 from .molecule import Molecule, Elements
 from .nifty import logger, isint, uncommadash, bohr2ang, ang2bohr
 from .rotate import calc_fac_dfac
@@ -88,8 +88,8 @@ def get_molecule_engine(**kwargs):
     ## MECI calculations create a custom engine that contains multiple engines.
     if kwargs.get('meci', None):
         if engine_str is not None:
-            if engine_str.lower() in ['psi4', 'gmx', 'molpro', 'qcengine', 'openmm', 'gaussian','quick', 'cfour']:
-                logger.warning("MECI optimizations are not tested with engines: psi4, gmx, molpro, qcengine, openmm, gaussian, quick, cfour. Be Careful!")
+            if engine_str.lower() in ['psi4', 'gmx', 'molpro', 'qcengine', 'openmm', 'gaussian','quick', 'cfour', 'pysander']:
+                logger.warning("MECI optimizations are not tested with engines: psi4, gmx, molpro, qcengine, openmm, gaussian, quick, cfour, pysander. Be Careful!")
         elif customengine:
             logger.warning("MECI optimizations are not tested with customengine. Be Careful!")
         ## If 'engine' is provided as the argument to 'meci', then we assume the engine is
@@ -134,7 +134,7 @@ def get_molecule_engine(**kwargs):
         engine_str = engine_str.lower()
         if engine_str[:4] == 'tera':
             engine_str = 'tera'
-        implemented_engines = ('tera', 'qchem', 'psi4', 'gmx', 'molpro', 'openmm', 'qcengine', "gaussian", "ase", "quick", "cfour")
+        implemented_engines = ('tera', 'qchem', 'psi4', 'gmx', 'molpro', 'openmm', 'qcengine', "gaussian", "ase", "quick", "cfour", "pysander")
         if engine_str not in implemented_engines:
             raise RuntimeError("Valid values of engine are: " + ", ".join(implemented_engines))
         if customengine:
@@ -360,6 +360,42 @@ def get_molecule_engine(**kwargs):
                 ase_class_name,
                 **json.loads(ase_kwargs),
             )
+        elif engine_str == "pysander":
+            logger.info("PySander engine selected. Expecting initial.xyz for coordinates and --prmtop/--inpcrd for AMBER files.\n")
+            
+            # Get prmtop and inpcrd files from kwargs
+            prmtop_file = kwargs.get('prmtop', None)
+            inpcrd_file = kwargs.get('inpcrd', None)
+            
+            # Require both prmtop and inpcrd to be specified
+            if prmtop_file is None:
+                raise ValueError("PySander engine requires --prmtop argument to specify topology file")
+            if inpcrd_file is None:
+                raise ValueError("PySander engine requires --inpcrd argument to specify coordinate file")
+            
+            if not os.path.exists(prmtop_file):
+                raise ValueError(f"Topology file {prmtop_file} does not exist")
+            if not os.path.exists(inpcrd_file):
+                raise ValueError(f"Coordinate file {inpcrd_file} does not exist")
+            
+            logger.info(f"   Using topology file: {prmtop_file}\n")
+            logger.info(f"   Using coordinate file: {inpcrd_file}\n")
+            
+            # Load molecule from initial.xyz (inputf)
+            if not inputf or not os.path.exists(inputf):
+                raise ValueError("PySander engine requires initial structure file (e.g., initial.xyz) for atomic coordinates and types")
+            
+            logger.info(f"   Loading initial structure from: {inputf}\n")
+            M = Molecule(inputf)
+            
+            # Create engine with the loaded molecule
+            engine = PySander(M, prmtop_file, inpcrd_file)
+            M.top_settings['radii'] = radii
+            M.top_settings['fragment'] = frag
+            M.build_topology()
+            
+            # Update the engine's molecule
+            engine.M = M
         else:
             raise RuntimeError("Failed to create an engine object, this might be a bug in get_molecule_engine")
     elif customengine:
