@@ -1917,12 +1917,14 @@ class PySander(Engine):
         
         # Load the parameter files
         self._load_parm_files()
+
+        # Set input
+        self._set_input()
     
     def _load_parm_files(self):
         """Load the AMBER parameter and coordinate files."""
         try:
             from parmed import load_file
-            import sander
             import os
         except ImportError:
             raise PySanderEngineError("PySander engine requires 'parmed' and 'sander' packages. Please install them.")
@@ -1934,7 +1936,19 @@ class PySander(Engine):
         
         # Load the parmed structure directly from files
         self.parm = load_file(self.prmtop_file, self.inpcrd_file)
-        
+
+    def _set_input(self):
+        """Setup sander input."""
+        try:
+            from sander import gas_input
+        except ImportError:
+            raise PySanderEngineError("PySander engine requires 'parmed' and 'sander' packages. Please install them.")        
+
+        # Set up sander input for gas phase calculation
+        self.inp = gas_input(6)  # 6 = igb for gas phase
+        self.box = None
+
+
     def calc_new(self, coords, dirname):
         """
         Calculate energy and gradient using PySander.
@@ -1953,7 +1967,7 @@ class PySander(Engine):
         """
         try:
             import numpy as np
-            import sander
+            from sander import setup, set_positions, energy_forces
         except ImportError:
             raise PySanderEngineError("PySander engine requires 'sander' package. Please install it.")
         
@@ -1963,15 +1977,11 @@ class PySander(Engine):
         # Update the parmed structure with new coordinates
         self.parm.coordinates = coords_ang.flatten()
         
-        # Set up sander input for gas phase calculation
-        inp = sander.gas_input(6)  # 6 = igb for gas phase
-        box = None
-        
         try:
-            with sander.setup(self.parm, self.parm.coordinates, box, inp):
+            with setup(self.parm, self.parm.coordinates, self.box, self.inp):
                 def f_and_g(x_flat):
-                    sander.set_positions(x_flat.reshape((-1, 3)))
-                    ene, grad = sander.energy_forces()
+                    set_positions(x_flat.reshape((-1, 3)))
+                    ene, grad = energy_forces()
                     return ene.tot, np.asarray(grad, dtype=np.float64)
                 
                 # Get initial coordinates
