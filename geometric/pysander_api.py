@@ -153,6 +153,8 @@ def create_molecule_cached(elements, initial_coords):
 
 
 def optimize_pysander_with_constraints(initial_coords: np.ndarray,
+                                     bohr_coords: np.array,
+                                     M: Molecule,
                                      elements: list,
                                      prmtop_content: str,
                                      inpcrd_content: str,
@@ -200,7 +202,7 @@ def optimize_pysander_with_constraints(initial_coords: np.ndarray,
     with tempfile.TemporaryDirectory() as temp_dir:
         try:
             # Create molecule with caching
-            M = create_molecule_cached(elements, initial_coords)
+            #M = create_molecule_cached(elements, initial_coords)
             
             # Create optimized PySander engine 
             engine = OptimizedPySanderFromString(M, prmtop_content, inpcrd_content)
@@ -228,8 +230,8 @@ def optimize_pysander_with_constraints(initial_coords: np.ndarray,
                                               constraints=Cons, cvals=CVals[0])
             
             # Convert coordinates to Bohr (pre-allocate for efficiency)
-            coords = np.empty(initial_coords.size, dtype=np.float64)
-            coords[:] = initial_coords.flatten() * ang2bohr
+            #coords = np.empty(initial_coords.size, dtype=np.float64)
+            #coords[:] = initial_coords.flatten() * ang2bohr
             
             # Optimized output suppression
             if not params['verbose']:
@@ -246,10 +248,10 @@ def optimize_pysander_with_constraints(initial_coords: np.ndarray,
                 
                 # Run optimization with minimal overhead
                 with minimal_suppress():
-                    optimizer = Optimizer(coords, M, IC, engine, temp_dir, opt_params, print_info=False)
+                    optimizer = Optimizer(bohr_coords, M, IC, engine, temp_dir, opt_params, print_info=False)
                     progress = optimizer.optimizeGeometry()
             else:
-                optimizer = Optimizer(coords, M, IC, engine, temp_dir, opt_params, print_info=True)
+                optimizer = Optimizer(bohr_coords, M, IC, engine, temp_dir, opt_params, print_info=True)
                 progress = optimizer.optimizeGeometry()
             
             # Extract results efficiently
@@ -322,6 +324,39 @@ def optimize_pysander_with_constraints(initial_coords: np.ndarray,
                 n_iterations=0,
                 convergence_info={}
             )
+
+def convert_coords_to_bohr(coords):
+    """
+    Convert a list of coordinate arrays from Angstrom to Bohr.
+    
+    Parameters:
+    -----------
+    coords_list : list of np.ndarray
+        List of coordinate arrays in Angstrom
+        
+    Returns:
+    --------
+    list of np.ndarray
+        List of coordinate arrays in Bohr
+    """
+    import numpy as np
+    
+    # Conversion factor: 1 Angstrom = 1.8897259885789 Bohr
+    ANGSTROM_TO_BOHR = 1.8897259885789
+    
+    return coords.flatten() * ANGSTROM_TO_BOHR
+
+
+def create_molecule(elements, initial_coords):
+    """Create molecule with caching for identical topologies"""
+
+    # Create new molecule
+    M = Molecule()
+    M.elem = elements
+    M.xyzs = [initial_coords.copy()]
+    M.build_topology()
+   
+    return M
 
 
 def clear_caches():
