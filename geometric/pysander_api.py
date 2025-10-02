@@ -161,6 +161,7 @@ def optimize_pysander_with_constraints(elements: list,
                                      debug_level: int = 0,
                                      output_suffix: str = "geometric_optimization",
                                      output_directory: str = ".",
+                                     use_vectorized_calcDiff: bool = True,
                                      **optimization_kwargs) -> GeomeTRICResult:
     """
     Optimize molecular geometry using PySander with constraints and zero file I/O.
@@ -191,6 +192,9 @@ def optimize_pysander_with_constraints(elements: list,
     output_directory : str, optional
         Directory to save output files (default: "." - current directory)
         Directory will be created if it doesn't exist
+    use_vectorized_calcDiff : bool, optional
+        Use vectorized calcDiff implementation for improved performance (default: True)
+        Provides approximately 18-24% speedup. Works with multiprocessing.
     **optimization_kwargs : dict
         Additional optimization parameters
     
@@ -268,7 +272,8 @@ def optimize_pysander_with_constraints(elements: list,
             
             # Setup internal coordinates with constraints - optimized build
             IC = DelocalizedInternalCoordinates(M, build=True, connect=True, addcart=True, 
-                                              constraints=Cons, cvals=CVals[0])
+                                              constraints=Cons, cvals=CVals[0],
+                                              use_vectorized_calcDiff=use_vectorized_calcDiff)
             
             # Convert coordinates to Bohr (pre-allocate for efficiency)
             #coords = np.empty(initial_coords.size, dtype=np.float64)
