@@ -1791,6 +1791,10 @@ class InternalCoordinates(object):
         # Cache statistics for performance monitoring
         self.cache_hits = 0
         self.cache_misses = 0
+        # G-inverse cache: stores (xyz_hash, invMW, sqrt) -> (Ginv, Gsqrt or None)
+        self.stored_Ginv = OrderedDict()
+        self.Ginv_cache_hits = 0
+        self.Ginv_cache_misses = 0
 
     def addConstraint(self, cPrim, cVal):
         raise NotImplementedError("Constraints not supported with Cartesian coordinates")
@@ -1808,11 +1812,14 @@ class InternalCoordinates(object):
         self.stored_wilsonB = OrderedDict()
         self.cache_hits = 0
         self.cache_misses = 0
+        self.stored_Ginv = OrderedDict()
+        self.Ginv_cache_hits = 0
+        self.Ginv_cache_misses = 0
     
     def getCacheStats(self):
         """
         Return cache statistics for performance monitoring.
-        
+
         Returns
         -------
         dict
@@ -1820,12 +1827,21 @@ class InternalCoordinates(object):
         """
         total_requests = self.cache_hits + self.cache_misses
         hit_rate = (self.cache_hits / total_requests * 100) if total_requests > 0 else 0.0
+
+        total_Ginv_requests = self.Ginv_cache_hits + self.Ginv_cache_misses
+        Ginv_hit_rate = (self.Ginv_cache_hits / total_Ginv_requests * 100) if total_Ginv_requests > 0 else 0.0
+
         return {
-            'cache_hits': self.cache_hits,
-            'cache_misses': self.cache_misses,
-            'cache_size': len(self.stored_wilsonB),
-            'hit_rate': hit_rate,
-            'total_requests': total_requests
+            'wilsonB_cache_hits': self.cache_hits,
+            'wilsonB_cache_misses': self.cache_misses,
+            'wilsonB_cache_size': len(self.stored_wilsonB),
+            'wilsonB_hit_rate': hit_rate,
+            'wilsonB_total_requests': total_requests,
+            'Ginv_cache_hits': self.Ginv_cache_hits,
+            'Ginv_cache_misses': self.Ginv_cache_misses,
+            'Ginv_cache_size': len(self.stored_Ginv),
+            'Ginv_hit_rate': Ginv_hit_rate,
+            'Ginv_total_requests': total_Ginv_requests
         }
     
     def printCacheStats(self):
@@ -1902,7 +1918,54 @@ class InternalCoordinates(object):
 
     def GInverse_SVD(self, xyz, sqrt=False, invMW=False):
         xyz = xyz.reshape(-1,3)
-        # Perform singular value decomposition
+
+        # Check cache first
+        xhash = hash(xyz.tobytes())
+        cache_key = (xhash, invMW, sqrt)
+
+        if cache_key in self.stored_Ginv:
+            self.Ginv_cache_hits += 1
+            cached_result = self.stored_Ginv[cache_key]
+            if sqrt:
+                return cached_result  # Returns (Inv, Sqrt) tuple
+            else:
+                return cached_result  # Returns just Inv
+
+        self.Ginv_cache_misses += 1
+
+        # Try Cholesky decomposition first (faster than SVD)
+        try:
+            G = self.GMatrix(xyz, invMW)
+            # Add small regularization for numerical stability
+            G_reg = G + 1e-10 * np.eye(G.shape[0])
+            L = np.linalg.cholesky(G_reg)
+
+            # Compute inverse via Cholesky: G^-1 = (L L^T)^-1 = L^-T L^-1
+            Linv = np.linalg.inv(L)
+            Inv = Linv.T @ Linv
+
+            if sqrt:
+                # For sqrt, we need sqrt(G), which is just L (since G = L L^T)
+                Sqrt = L @ L.T  # Reconstruct for consistency
+                result = (Inv, Sqrt)
+            else:
+                result = Inv
+
+            # Cache the result
+            self.stored_Ginv[cache_key] = result
+
+            # Limit cache size to prevent memory issues
+            if len(self.stored_Ginv) > 500:
+                # Remove oldest entry (FIFO)
+                self.stored_Ginv.popitem(last=False)
+
+            return result
+
+        except np.linalg.LinAlgError:
+            # Cholesky failed (G not positive definite), fall back to SVD
+            pass
+
+        # Perform singular value decomposition (fallback)
         click()
         loops = 0
         while True:
@@ -1936,14 +1999,25 @@ class InternalCoordinates(object):
         # print "%i atoms; %i/%i singular values are > 1e-6" % (xyz.shape[0], LargeVals, len(S))
         Sinv = np.diag(Sinv)
         Inv = multi_dot([V, Sinv, UT])
-       
+
         # When "sqrt" is True, return the sqrt of the G matrix along with its inverse.
         # Sqrt of the G matrix is used to calculate gradients and Hessian in mass-weighted IC.
         if sqrt:
             Ssqrt = np.diag(Ssqrt)
             Sqrt = multi_dot([V, Ssqrt, UT])
-            return Inv, Sqrt
-        return Inv
+            result = (Inv, Sqrt)
+        else:
+            result = Inv
+
+        # Cache the result
+        self.stored_Ginv[cache_key] = result
+
+        # Limit cache size to prevent memory issues
+        if len(self.stored_Ginv) > 500:
+            # Remove oldest entry (FIFO)
+            self.stored_Ginv.popitem(last=False)
+
+        return result
 
     def GInverse_EIG(self, xyz): # pragma: no cover
         # Currently unused function, but could possibly speed up calculations
