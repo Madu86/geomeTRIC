@@ -1868,11 +1868,13 @@ class InternalCoordinates(object):
         
         # Cache miss: compute the base Wilson B-matrix (expensive operation)
         self.cache_misses += 1
-        WilsonB = []
         Der = self.derivatives(xyz)
-        for i in range(Der.shape[0]):
-            WilsonB.append(Der[i].flatten())
-        base_matrix = np.array(WilsonB)
+        # Pre-allocate array for better performance
+        n_internals = Der.shape[0]
+        n_coords = Der.shape[1] * Der.shape[2]  # n_atoms * 3
+        base_matrix = np.empty((n_internals, n_coords), dtype=float)
+        for i in range(n_internals):
+            base_matrix[i] = Der[i].flatten()
         
         # Store only the base (non-mass-weighted) matrix to save memory
         self.stored_wilsonB[xhash] = base_matrix
@@ -2756,10 +2758,11 @@ class PrimitiveInternalCoordinates(InternalCoordinates):
             logger.info("Enabled vectorized calcDiff for performance optimization\n")
 
     def calculate(self, xyz):
-        answer = []
-        for Internal in self.Internals:
-            answer.append(Internal.value(xyz))
-        return np.array(answer)
+        # Pre-allocate array for better performance (avoids list append + conversion)
+        answer = np.empty(len(self.Internals), dtype=float)
+        for i, Internal in enumerate(self.Internals):
+            answer[i] = Internal.value(xyz)
+        return answer
 
     def getRotatorNorms(self):
         rots = []
@@ -2778,27 +2781,23 @@ class PrimitiveInternalCoordinates(InternalCoordinates):
 
     def derivatives(self, xyz):
         self.calculate(xyz)
-        answer = []
-        for Internal in self.Internals:
-            answer.append(Internal.derivative(xyz))
-        # This array has dimensions:
-        # 1) Number of internal coordinates
-        # 2) Number of atoms
-        # 3) 3
-        return np.array(answer)
+        # Pre-allocate array with known shape for better performance
+        # Dimensions: (n_internals, n_atoms, 3)
+        n_atoms = xyz.reshape(-1).shape[0] // 3
+        answer = np.empty((len(self.Internals), n_atoms, 3), dtype=float)
+        for i, Internal in enumerate(self.Internals):
+            answer[i] = Internal.derivative(xyz)
+        return answer
 
     def second_derivatives(self, xyz):
         self.calculate(xyz)
-        answer = []
-        for Internal in self.Internals:
-            answer.append(Internal.second_derivative(xyz))
-        # This array has dimensions:
-        # 1) Number of internal coordinates
-        # 2) Number of atoms
-        # 3) 3
-        # 4) Number of atoms
-        # 5) 3
-        return np.array(answer)
+        # Pre-allocate array with known 5D shape for better performance
+        # Dimensions: (n_internals, n_atoms, 3, n_atoms, 3)
+        n_atoms = xyz.reshape(-1).shape[0] // 3
+        answer = np.empty((len(self.Internals), n_atoms, 3, n_atoms, 3), dtype=float)
+        for i, Internal in enumerate(self.Internals):
+            answer[i] = Internal.second_derivative(xyz)
+        return answer
     
     def calcDiff(self, xyz1, xyz2):
         """ Calculate difference in internal coordinates (coord1-coord2), accounting for changes in 2*pi of angles. """
@@ -2806,10 +2805,11 @@ class PrimitiveInternalCoordinates(InternalCoordinates):
         if hasattr(self, '_use_vectorized_calcDiff') and self._use_vectorized_calcDiff:
             return self.calcDiff_vectorized(xyz1, xyz2)
         
-        answer = []
-        for Internal in self.Internals:
-            answer.append(Internal.calcDiff(xyz1, xyz2))
-        return np.array(answer)
+        # Pre-allocate array for better performance
+        answer = np.empty(len(self.Internals), dtype=float)
+        for i, Internal in enumerate(self.Internals):
+            answer[i] = Internal.calcDiff(xyz1, xyz2)
+        return answer
     
     def calcDiff_vectorized(self, xyz1, xyz2):
         """
