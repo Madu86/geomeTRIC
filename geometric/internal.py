@@ -1788,6 +1788,9 @@ CacheWarning = False
 class InternalCoordinates(object):
     def __init__(self):
         self.stored_wilsonB = OrderedDict()
+        # Cache statistics for performance monitoring
+        self.cache_hits = 0
+        self.cache_misses = 0
 
     def addConstraint(self, cPrim, cVal):
         raise NotImplementedError("Constraints not supported with Cartesian coordinates")
@@ -1803,30 +1806,87 @@ class InternalCoordinates(object):
 
     def clearCache(self):
         self.stored_wilsonB = OrderedDict()
+        self.cache_hits = 0
+        self.cache_misses = 0
+    
+    def getCacheStats(self):
+        """
+        Return cache statistics for performance monitoring.
+        
+        Returns
+        -------
+        dict
+            Dictionary containing cache_hits, cache_misses, cache_size, and hit_rate
+        """
+        total_requests = self.cache_hits + self.cache_misses
+        hit_rate = (self.cache_hits / total_requests * 100) if total_requests > 0 else 0.0
+        return {
+            'cache_hits': self.cache_hits,
+            'cache_misses': self.cache_misses,
+            'cache_size': len(self.stored_wilsonB),
+            'hit_rate': hit_rate,
+            'total_requests': total_requests
+        }
+    
+    def printCacheStats(self):
+        """Print formatted cache statistics."""
+        stats = self.getCacheStats()
+        logger.info("="*60 + "\\n")
+        logger.info("Wilson B-Matrix Cache Statistics:\\n")
+        logger.info("="*60 + "\\n")
+        logger.info(f"Cache Hits:        {stats['cache_hits']:6d}\\n")
+        logger.info(f"Cache Misses:      {stats['cache_misses']:6d}\\n")
+        logger.info(f"Total Requests:    {stats['total_requests']:6d}\\n")
+        logger.info(f"Hit Rate:          {stats['hit_rate']:6.2f}%\\n")
+        logger.info(f"Cached Matrices:   {stats['cache_size']:6d}\\n")
+        logger.info("="*60 + "\\n")
 
     def wilsonB(self, xyz, invMW=False):
         """
         Given Cartesian coordinates xyz, return the Wilson B-matrix
         given by dq_i/dx_j where x is flattened (i.e. x1, y1, z1, x2, y2, z2)
+        
+        Performance optimization: Caches B-matrix computation which is expensive.
+        The cache stores only the base (non-mass-weighted) matrix to save memory.
+        Mass weighting is applied on-the-fly when invMW=True.
+        
+        Cache statistics (hits/misses) are tracked for performance monitoring.
         """
         global CacheWarning
         t0 = time.time()
         xhash = hash(xyz.tobytes())
         ht = time.time() - t0
+        
+        # Check cache for base B-matrix (memory-efficient: stores only one version per xyz)
         if xhash in self.stored_wilsonB:
+            self.cache_hits += 1
             ans = self.stored_wilsonB[xhash]
+            # Apply mass weighting on-the-fly if requested (cheap operation)
+            if invMW:
+                ans = ans / np.tile(np.sqrt(self.mass), (len(self.Internals), 1))
             return ans
+        
+        # Cache miss: compute the base Wilson B-matrix (expensive operation)
+        self.cache_misses += 1
         WilsonB = []
         Der = self.derivatives(xyz)
         for i in range(Der.shape[0]):
             WilsonB.append(Der[i].flatten())
-        self.stored_wilsonB[xhash] = np.array(WilsonB)
+        base_matrix = np.array(WilsonB)
+        
+        # Store only the base (non-mass-weighted) matrix to save memory
+        self.stored_wilsonB[xhash] = base_matrix
+        
         if len(self.stored_wilsonB) > 1000 and not CacheWarning:
             logger.warning("\x1b[91mWarning: more than 1000 B-matrices stored, memory leaks likely\x1b[0m\n")
             CacheWarning = True
-        ans = np.array(WilsonB)
+        
+        # Apply mass weighting if requested
         if invMW:
-            ans /= np.tile(np.sqrt(self.mass), (len(self.Internals), 1))
+            ans = base_matrix / np.tile(np.sqrt(self.mass), (len(self.Internals), 1))
+        else:
+            ans = base_matrix
+        
         return ans
 
     def GMatrix(self, xyz, invMW=False):
