@@ -212,7 +212,7 @@ def optimize_pysander_with_constraints(elements: list,
         'convergence_drms': 1.2e-3,
         'convergence_dmax': 1.8e-3,
         'trust_radius': 0.1,
-        'coordsys': 'dlc',
+        'coordsys': 'tric',
         'verbose': False
     }
     params.update(optimization_kwargs)
